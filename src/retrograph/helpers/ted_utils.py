@@ -1,23 +1,19 @@
 """
 Utility functions for Tree Edit Distance (TED) calculations using the apted package.
 
-This module provides functions to convert between tmap's SynthesisTree format and the
+This module provides functions to convert between SynthesisTree format and the
 format required by the apted package, as well as utility functions for computing
 pairwise distances between trees. It relies on the 'apted' library for the core
 distance calculation.
 """
 
-# Standard library imports
 from typing import List, Dict, Any, Union, Tuple, Optional
 
-# Third-party imports
 import numpy as np
 
-# Local application/library specific imports
 from ..core import SynthesisTree, SynthesisTreeNode
-from ..config import ted_config # Import TED cost constants
+from ..config import ted_config
 
-# Attempt to import APTED and set a flag
 try:
     from apted import APTED, Config as AptedBaseConfig
     APTED_AVAILABLE = True
@@ -25,18 +21,6 @@ except ImportError:
     APTED_AVAILABLE = False
     AptedBaseConfig = object # Define a dummy base class if apted is not available
 
-# --- Constants for TED Cost Configuration ---
-# COST_DELETE = 1.0
-# COST_INSERT = 1.0
-# COST_RENAME_TYPE_MISMATCH = 1.0
-# COST_RENAME_REACTION_LEN_MISMATCH = 1.0
-# COST_RENAME_REACTION_CLASS_1_DIFF = 0.8
-# COST_RENAME_REACTION_CLASS_2_DIFF = 0.5
-# COST_RENAME_REACTION_CLASS_3_DIFF = 0.0 # Cost is 0 if only 3rd reaction class number differs
-# COST_RENAME_MATCH = 0.0
-# DELETED: TED cost constants are now defined in src.retrograph.config.ted_config
-
-# --- Helper Function ---
 
 def _get_reaction_class_numbers(classification: str) -> List[int]:
     """Splits AiZynthFinder reaction classification string into numbers.
@@ -67,8 +51,20 @@ class CustomAptedConfig(AptedBaseConfig):
     """Custom APTED config using specific costs for SynthesisTreeNode comparison.
 
     Defines costs for delete, insert, and rename operations based on node type
-    (mol or reaction) and reaction classification similarity.
+    (mol or reaction) and reaction classification similarity (if mode is 'classification_aware').
     """
+    def __init__(self, mode: str = "shape"):
+        """
+        Args:
+            mode (str): TED calculation mode.
+                        "shape": Considers only node types for rename cost.
+                        "classification_aware": Considers reaction classifications for rename cost.
+        """
+        if mode not in ["shape", "classification_aware"]:
+            raise ValueError(f"Invalid TED mode: {mode}. Must be 'shape' or 'classification_aware'.")
+        self.mode = mode
+        super().__init__()
+
 
     def delete(self, node: Dict[str, Any]) -> float:
         """Calculates the cost of deleting a node."""
@@ -81,14 +77,8 @@ class CustomAptedConfig(AptedBaseConfig):
     def rename(self, node1: Dict[str, Any], node2: Dict[str, Any]) -> float:
         """Calculates the cost of renaming (substituting) node1 with node2.
 
-        Costs depend on node types and reaction classification similarity.
-
-        Args:
-            node1: The first node dictionary (apted format).
-            node2: The second node dictionary (apted format).
-
-        Returns:
-            The cost of renaming, between 0.0 and 1.0.
+        Costs depend on node types and, if mode is 'classification_aware',
+        on reaction classification similarity.
         """
         type1 = node1.get("type")
         type2 = node2.get("type")
@@ -96,44 +86,56 @@ class CustomAptedConfig(AptedBaseConfig):
         if type1 != type2:
             return ted_config.COST_RENAME_TYPE_MISMATCH
 
-        if type1 == "reaction":
-            # Extract classifications safely
-            classification1 = node1.get("metadata", {}).get("classification", "")
-            classification2 = node2.get("metadata", {}).get("classification", "")
+        # If types are the same:
+        if self.mode == "shape":
+            return 0.0 # Identical nodes always have zero cost
 
-            if not classification1 or not classification2:
-                # Handle missing classifications - treat as max difference?
-                return ted_config.COST_RENAME_TYPE_MISMATCH # Or another appropriate cost
+        elif self.mode == "classification_aware":
+            if type1 == "reaction":
+                classification1 = node1.get("metadata", {}).get("classification", "")
+                classification2 = node2.get("metadata", {}).get("classification", "")
 
-            reaction_nums1 = _get_reaction_class_numbers(classification1)
-            reaction_nums2 = _get_reaction_class_numbers(classification2)
+                if not classification1 or not classification2:
+                    # If one or both classifications are missing, consider it a significant difference,
+                    # but not as much as a type mismatch if both are reactions.
+                    # Or, if only one is missing, it's a mismatch.
+                    # If both missing and types are 'reaction', could be COST_RENAME_MATCH.
+                    # For simplicity, if either is empty, treat as COST_RENAME_REACTION_LEN_MISMATCH.
+                    return ted_config.COST_RENAME_REACTION_LEN_MISMATCH if (classification1 or classification2) else ted_config.COST_RENAME_MATCH
 
-            if len(reaction_nums1) != len(reaction_nums2):
-                return ted_config.COST_RENAME_REACTION_LEN_MISMATCH
 
-            if not reaction_nums1: # Handle empty lists after parsing
-                return ted_config.COST_RENAME_MATCH if not reaction_nums2 else ted_config.COST_RENAME_REACTION_LEN_MISMATCH
+                reaction_nums1 = _get_reaction_class_numbers(classification1)
+                reaction_nums2 = _get_reaction_class_numbers(classification2)
 
-            # Compare reaction class numbers element-wise
-            diffs = np.not_equal(reaction_nums1, reaction_nums2)
-            num_diffs = len(diffs)
+                if not reaction_nums1 and not reaction_nums2: # Both parsed to empty (e.g. "Reaction" vs "Reaction")
+                    return 0.0 # Identical nodes always have zero cost
+                if not reaction_nums1 or not reaction_nums2: # One parsed to empty, other not
+                    return ted_config.COST_RENAME_REACTION_LEN_MISMATCH
+                if len(reaction_nums1) != len(reaction_nums2): # Different number of class parts
+                    return ted_config.COST_RENAME_REACTION_LEN_MISMATCH
 
-            if num_diffs > 0 and diffs[0]:
-                return ted_config.COST_RENAME_REACTION_CLASS_1_DIFF
-            elif num_diffs > 1 and diffs[1]:
-                return ted_config.COST_RENAME_REACTION_CLASS_2_DIFF
-            elif num_diffs > 2 and diffs[2]:
-                 # Per original logic, cost is 0 if only 3rd differs
-                return ted_config.COST_RENAME_REACTION_CLASS_3_DIFF
-            else: # No differences found
-                return ted_config.COST_RENAME_MATCH
 
-        elif type1 == "mol":
-            # Assume renaming cost for identical molecule types is 0
-            return ted_config.COST_RENAME_MATCH
+                diffs = np.not_equal(reaction_nums1, reaction_nums2)
+                num_parts = len(reaction_nums1) # reaction_nums1 and reaction_nums2 have same len here
+
+                if num_parts > 0 and diffs[0]:
+                    return ted_config.COST_RENAME_REACTION_CLASS_1_DIFF
+                elif num_parts > 1 and diffs[1]:
+                    return ted_config.COST_RENAME_REACTION_CLASS_2_DIFF
+                elif num_parts > 2 and diffs[2]:
+                    return ted_config.COST_RENAME_REACTION_CLASS_3_DIFF
+                else: # No differences found or fewer than 3 parts and all matched
+                    return 0.0 # Identical nodes always have zero cost
+
+            elif type1 == "mol":
+                # Molecules of the same type are considered a match in this mode too
+                return 0.0 # Identical nodes always have zero cost
+            else: # Unknown type, but types are same (e.g. "foo" == "foo")
+                  # This case should ideally not be hit if node types are standardized ('mol', 'reaction')
+                return 0.0 # Identical nodes always have zero cost
         else:
-            # Unknown type, assume maximum difference cost
-            return ted_config.COST_RENAME_TYPE_MISMATCH
+             # This path should be unreachable due to __init__ validation
+            raise ValueError(f"Internal error: Unhandled TED mode: {self.mode}")
 
 
     def children(self, node: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -141,26 +143,22 @@ class CustomAptedConfig(AptedBaseConfig):
         return node.get("children", [])
 
 
-# --- Core TED Computation Functions ---
 
-def compute_ted_with_apted(tree1: Dict[str, Any], tree2: Dict[str, Any]) -> float:
+def compute_ted_with_apted(tree1: Dict[str, Any], tree2: Dict[str, Any], mode: str = "shape") -> float:
     """Computes Tree Edit Distance using the APTED algorithm and CustomAptedConfig.
 
     Args:
         tree1: First tree in apted dictionary format.
         tree2: Second tree in apted dictionary format.
+        mode: TED calculation mode ("shape" or "classification_aware").
 
     Returns:
         The Tree Edit Distance between the trees.
-
-    Raises:
-        ImportError: If the 'apted' package is not installed.
     """
     if not APTED_AVAILABLE:
-        raise ImportError("APTED package is required for Tree Edit Distance calculation. "
-                          "Please install it (e.g., 'pip install apted').")
+        raise ImportError("APTED package is required. Please install it (e.g., 'pip install apted').")
 
-    apted_calculator = APTED(tree1, tree2, CustomAptedConfig())
+    apted_calculator = APTED(tree1, tree2, CustomAptedConfig(mode=mode))
     return apted_calculator.compute_edit_distance()
 
 def convert_to_apted_tree(tree: Union[SynthesisTree, SynthesisTreeNode]) -> Dict[str, Any]:
@@ -197,7 +195,7 @@ def convert_to_apted_tree(tree: Union[SynthesisTree, SynthesisTreeNode]) -> Dict
         "type": node_type,
         "label": node_label,
         "metadata": metadata,
-        "children": [] # Initialize children list
+        "children": []
     }
 
     # Recursively convert children if they exist
@@ -207,15 +205,15 @@ def convert_to_apted_tree(tree: Union[SynthesisTree, SynthesisTreeNode]) -> Dict
     return apted_node
 
 def compute_ted(tree1: Union[SynthesisTree, SynthesisTreeNode],
-               tree2: Union[SynthesisTree, SynthesisTreeNode]) -> float:
+               tree2: Union[SynthesisTree, SynthesisTreeNode],
+               mode: str = "shape") -> float:
     """Computes the Tree Edit Distance (TED) between two Synthesis Trees/Nodes.
-
-    Uses the 'apted' library with custom costs if available. Falls back to a
-    simple node count difference if 'apted' is not installed.
 
     Args:
         tree1: The first SynthesisTree or SynthesisTreeNode.
         tree2: The second SynthesisTree or SynthesisTreeNode.
+        mode: TED calculation mode ("shape" or "classification_aware").
+              Defaults to "shape".
 
     Returns:
         The computed Tree Edit Distance.
@@ -245,25 +243,28 @@ def compute_ted(tree1: Union[SynthesisTree, SynthesisTreeNode],
         count2 = _count_nodes(root2)
         return float(abs(count1 - count2)) # Return absolute difference as float
 
-    # --- Use APTED if available ---
+    # Use APTED if available
     try:
         apted_tree1 = convert_to_apted_tree(tree1)
         apted_tree2 = convert_to_apted_tree(tree2)
-        return compute_ted_with_apted(apted_tree1, apted_tree2)
+        return compute_ted_with_apted(apted_tree1, apted_tree2, mode=mode)
     except Exception as e:
-        # Catch potential errors during conversion or computation if apted is installed
+        # Log the error with full context
         print(f"Error during apted computation or tree conversion: {e}")
-        # Optional: Fallback here too, or re-raise
-        raise # Re-raise the exception for now
+        # Wrap the error with more context and preserve the original error
+        raise RuntimeError(f"Failed to compute TED: {str(e)}") from e
 
 
-# --- Batch Processing and KNN ---
+# Batch Processing
 
-def compute_pairwise_distances(trees: List[Union[SynthesisTree, SynthesisTreeNode]]) -> np.ndarray:
+def compute_pairwise_distances(trees: List[Union[SynthesisTree, SynthesisTreeNode]],
+                               mode: str = "shape") -> np.ndarray:
     """Computes pairwise TED distances for a list of trees.
 
     Args:
         trees: A list of SynthesisTree or SynthesisTreeNode objects.
+        mode: TED calculation mode ("shape" or "classification_aware")
+              to be passed to compute_ted. Defaults to "shape".
 
     Returns:
         A numpy array (n x n) containing the pairwise TED distances, where n is
@@ -276,30 +277,21 @@ def compute_pairwise_distances(trees: List[Union[SynthesisTree, SynthesisTreeNod
 
     distances = np.zeros((n, n), dtype=float) # Initialize distance matrix
 
-    # Calculate upper triangle (including diagonal, although it will be 0)
+    # Calculate upper triangle (including diagonal 0)
     for i in range(n):
         for j in range(i, n): # Start j from i
             if i == j:
                 distances[i, j] = 0.0 # Distance to self is 0
                 continue
             try:
-                dist = compute_ted(trees[i], trees[j])
+                dist = compute_ted(trees[i], trees[j], mode=mode)
                 distances[i, j] = dist
                 distances[j, i] = dist # Symmetric matrix
             except Exception as e:
-                 print(f"Error computing TED between tree {i} and tree {j}: {e}")
+                 print(f"Error computing TED between tree {i} and tree {j} (mode: {mode}): {e}")
                  # Assign a high value or NaN? For now, let's use NaN
                  distances[i, j] = np.nan
                  distances[j, i] = np.nan
 
 
     return distances
-
-# Remove the get_k_nearest_neighbors function entirely
-# def get_k_nearest_neighbors(distances: np.ndarray, k: int) -> List[Tuple[int, int, float]]:
-#     """Finds the k-nearest neighbors for each node based on a distance matrix.
-#     ...
-#     """
-#     n = distances.shape[0]
-#     # ... (rest of function code) ...
-#     return edge_list 
