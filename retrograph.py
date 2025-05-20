@@ -1,8 +1,8 @@
 """
-Visualizes AiZynthFinder synthesis route trees using TED-based t-MAP layout.
+Visualizes AiZynthFinder synthesis route trees using TED-based tmap layout.
 
 Loads trees from an AiZynthFinder output JSON file (gzipped), converts them
-to SynthesisTree objects, computes a t-MAP layout using Tree Edit Distance (TED)
+to SynthesisTree objects, computes a tmap layout using Tree Edit Distance (TED)
 with TEDLayoutGenerator, and generates an interactive HTML visualization using
 Faerun.
 """
@@ -20,7 +20,7 @@ from src.retrograph.utils.logging import logger
 def parse_args() -> RetrographConfig:
     """Parse command line arguments and return a RetrographConfig object."""
     parser = argparse.ArgumentParser(
-        description="Visualize AiZynthFinder trees using TED-based t-MAP and Faerun.",
+        description="Visualize AiZynthFinder trees using TED-based tmap and Faerun.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument(
@@ -118,7 +118,7 @@ def run_retrograph(config: RetrographConfig) -> None:
         )
 
         # 3. Generate Layout
-        logger.info("Generating t-MAP layout (this may take some time)...")
+        logger.info("Generating tmap layout (this may take some time)...")
         try:
             embedding = layout_generator.layout(trees, create_mst_override=config.create_mst) 
             logger.info("Layout generation complete.")
